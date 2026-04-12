@@ -8,7 +8,7 @@ val_file = "val.txt"
 data_file = "train.bin"
 index_file = "train.idx"
 vocab_file = "vocab.pth"
-val_size = 500
+val_size = 300
 embedding_dim = 128
 hidden_dim = 512
 num_layers = 3
@@ -18,7 +18,7 @@ num_epochs = 40
 batch_size = 32
 max_length = 600
 pad_token = "<pad>"
-lines_per_epoch = 5000
+lines_per_epoch = 1000
 pos_weight_value = 5.7
 
 def load_index():
@@ -76,26 +76,38 @@ def compute_f1(logits, labels, mask):
 class WhitespaceCorrector(torch.nn.Module):
     def __init__(self, char_vocab_size):
         super().__init__()
+        channels = 256
+        kernel_size = 3
+        dilations = [1, 2, 4, 8, 16, 32]
         self.embedding = torch.nn.Embedding(char_vocab_size, embedding_dim)
-        self.lstm = torch.nn.LSTM(
-            embedding_dim, hidden_dim,
-            num_layers=num_layers,
-            bidirectional=True,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.head = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim * 2, hidden_dim),
-            torch.nn.ReLU(),
+        self.input_proj = torch.nn.Linear(embedding_dim, channels)
+        self.blocks = torch.nn.ModuleList([
+            self._make_block(channels, kernel_size, d) for d in dilations
+        ])
+        self.norm = torch.nn.LayerNorm(channels)
+        self.head = torch.nn.Linear(channels, 1)
+
+    def _make_block(self, channels, kernel_size, dilation):
+        pad = dilation * (kernel_size - 1) // 2
+        return torch.nn.Sequential(
+            torch.nn.LayerNorm(channels),
+            Transpose(),
+            torch.nn.Conv1d(channels, channels, kernel_size, dilation=dilation, padding=pad, groups=channels),
+            torch.nn.Conv1d(channels, channels, 1),
+            Transpose(),
+            torch.nn.GELU(),
             torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, x):
-        embeds = self.embedding(x)
-        lstm_out, _ = self.lstm(embeds)
-        logits = self.head(lstm_out)
-        return logits.squeeze(-1)
+        out = self.input_proj(self.embedding(x))
+        for block in self.blocks:
+            out = out + block(out)
+        return self.head(self.norm(out)).squeeze(-1)
+
+class Transpose(torch.nn.Module):
+    def forward(self, x):
+        return x.transpose(1, 2)
 
 def train_epoch(model, optimizer, data_fp, offsets, lengths, num_lines, pos_weight):
     model.train()
@@ -213,8 +225,8 @@ def main():
         scheduler.step(avg_f1)
         if avg_f1 > best_f1:
             best_f1 = avg_f1
-            torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector_best.pth")
-            print(f"  -> New best ({best_f1:.4f}), saved whitespace_corrector_best.pth")
+            torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector.pth")
+            print(f"  -> New best ({best_f1:.4f}), saved whitespace_corrector.pth")
     data_fp.close()
     torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector.pth")
     print(f"Training finished. Best validation F1: {best_f1:.4f}")
