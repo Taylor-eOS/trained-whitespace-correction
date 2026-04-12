@@ -1,20 +1,22 @@
 import torch
 import random
 from tqdm import tqdm
-#from utils import 
 
 val_file = "val.txt"
 train_file = "train.txt"
-val_size = 100
-embedding_dim = 64
-hidden_dim = 128
-num_layers = 2
+val_size = 500
+embedding_dim = 128
+hidden_dim = 512
+num_layers = 3
+dropout = 0.3
 learning_rate = 0.001
-num_epochs = 10
-batch_size = 16
-max_length = 300
+num_epochs = 40
+batch_size = 32
+max_length = 600
 pad_token = "<pad>"
-lines_per_epoch = 1000
+lines_per_epoch = 5000
+pos_weight_value = 5.7
+
 
 def build_vocab():
     with open(train_file, "r", encoding="latin-1") as f:
@@ -23,6 +25,7 @@ def build_vocab():
     vocab = {char: idx for idx, char in enumerate(chars)}
     vocab[pad_token] = len(vocab)
     return vocab, len(vocab)
+
 
 def prepare_batch(batch_lines, vocab, max_length):
     inputs = []
@@ -52,6 +55,7 @@ def prepare_batch(batch_lines, vocab, max_length):
     labels_padded = torch.nn.utils.rnn.pad_sequence(labelss, batch_first=True, padding_value=0.0)
     return input_padded, labels_padded
 
+
 def compute_f1(logits, labels, mask):
     preds = (torch.sigmoid(logits) > 0.5).float()
     tp = ((preds == 1) & (labels == 1) & (mask == 1)).sum().item()
@@ -62,18 +66,31 @@ def compute_f1(logits, labels, mask):
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     return f1
 
+
 class WhitespaceCorrector(torch.nn.Module):
     def __init__(self, char_vocab_size):
         super().__init__()
-        self.embedding = torch.nn.Embedding(char_vocab_size, embedding_dim)
-        self.lstm = torch.nn.LSTM(embedding_dim, hidden_dim, num_layers=num_layers, bidirectional=True, batch_first=True)
-        self.linear = torch.nn.Linear(hidden_dim * 2, 1)
+        self.embedding = torch.nn.Embedding(char_vocab_size, embedding_dim, padding_idx=None)
+        self.lstm = torch.nn.LSTM(
+            embedding_dim, hidden_dim,
+            num_layers=num_layers,
+            bidirectional=True,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+        self.head = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim * 2, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, x):
         embeds = self.embedding(x)
         lstm_out, _ = self.lstm(embeds)
-        logits = self.linear(lstm_out)
+        logits = self.head(lstm_out)
         return logits.squeeze(-1)
+
 
 def stream_train_lines(target_count):
     selected = []
@@ -99,7 +116,21 @@ def stream_train_lines(target_count):
                     break
     return selected
 
-def train_epoch(model, optimizer, vocab):
+
+def run_batch(model, input_padded, labels_padded, pos_weight):
+    logits = model(input_padded)
+    mask = (input_padded != model.embedding.num_embeddings - 1).float()
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, labels_padded,
+        pos_weight=pos_weight,
+        reduction="none",
+    )
+    loss_sum = (loss * mask).sum()
+    token_count = mask.sum()
+    return logits, loss_sum, token_count
+
+
+def train_epoch(model, optimizer, vocab, pos_weight):
     model.train()
     train_lines = stream_train_lines(lines_per_epoch)
     progress_bar = tqdm(total=len(train_lines), desc="Training", unit="lines")
@@ -111,14 +142,11 @@ def train_epoch(model, optimizer, vocab):
         if len(batch_lines) == batch_size:
             input_padded, labels_padded = prepare_batch(batch_lines, vocab, max_length)
             if input_padded is not None:
-                logits = model(input_padded)
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, reduction="none")
-                mask = (input_padded != vocab[pad_token]).float()
-                loss_sum = (loss * mask).sum()
-                token_count = mask.sum()
+                _, loss_sum, token_count = run_batch(model, input_padded, labels_padded, pos_weight)
                 loss_mean = loss_sum / token_count
                 optimizer.zero_grad()
                 loss_mean.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 total_loss += loss_sum.item()
                 total_tokens += token_count.item()
@@ -127,14 +155,11 @@ def train_epoch(model, optimizer, vocab):
     if batch_lines:
         input_padded, labels_padded = prepare_batch(batch_lines, vocab, max_length)
         if input_padded is not None:
-            logits = model(input_padded)
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, reduction="none")
-            mask = (input_padded != vocab[pad_token]).float()
-            loss_sum = (loss * mask).sum()
-            token_count = mask.sum()
+            _, loss_sum, token_count = run_batch(model, input_padded, labels_padded, pos_weight)
             loss_mean = loss_sum / token_count
             optimizer.zero_grad()
             loss_mean.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             total_loss += loss_sum.item()
             total_tokens += token_count.item()
@@ -142,6 +167,7 @@ def train_epoch(model, optimizer, vocab):
     progress_bar.close()
     avg_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
     return avg_loss
+
 
 def validate(model, vocab, val_lines):
     model.eval()
@@ -161,6 +187,7 @@ def validate(model, vocab, val_lines):
             num_batches += 1
     return total_f1 / num_batches if num_batches > 0 else 0.0
 
+
 def load_val_sample(val_size):
     reservoir = []
     with open(val_file, "r", encoding="latin-1") as f:
@@ -176,22 +203,32 @@ def load_val_sample(val_size):
                     reservoir[j] = line
     return reservoir
 
+
 def main():
-    with open(val_file, "r", encoding="latin-1") as f:
-        val_lines = load_val_sample(val_size)
+    val_lines = load_val_sample(val_size)
     vocab, vocab_size = build_vocab()
     model = WhitespaceCorrector(vocab_size)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Vocab size: {vocab_size}, Parameters: {total_params:,}")
+    pos_weight = torch.tensor([pos_weight_value])
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=3)
+    best_f1 = 0.0
     for epoch in range(num_epochs):
-        print(f"Starting epoch {epoch+1}/{num_epochs}")
-        train_loss = train_epoch(model, optimizer, vocab)
+        print(f"Starting epoch {epoch+1}/{num_epochs}  lr={optimizer.param_groups[0]['lr']:.2e}")
+        train_loss = train_epoch(model, optimizer, vocab, pos_weight)
         print(f"Training loss: {train_loss:.6f}")
         print("Running validation...")
         avg_f1 = validate(model, vocab, val_lines)
         print(f"Epoch {epoch+1} completed. Validation F1: {avg_f1:.4f}")
+        scheduler.step(avg_f1)
+        if avg_f1 > best_f1:
+            best_f1 = avg_f1
+            torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector_best.pth")
+            print(f"  -> New best ({best_f1:.4f}), saved whitespace_corrector_best.pth")
     torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector.pth")
-    print("Training finished and model saved")
+    print(f"Training finished. Best validation F1: {best_f1:.4f}")
+
 
 if __name__ == "__main__":
     main()
-
