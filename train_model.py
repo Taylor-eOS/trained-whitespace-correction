@@ -1,8 +1,10 @@
 import torch
 import random
+import os
 from tqdm import tqdm
 
 train_file = "train.txt"
+val_file = "val.txt"
 val_size = 10000
 embedding_dim = 64
 hidden_dim = 128
@@ -73,33 +75,70 @@ class WhitespaceCorrector(torch.nn.Module):
         logits = self.linear(lstm_out)
         return logits.squeeze(-1)
 
+def create_val_file(train_file, val_file, val_size):
+    reservoir = []
+    count = 0
+    with open(train_file, "r", encoding="latin-1") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            count += 1
+            if len(reservoir) < val_size:
+                reservoir.append(stripped)
+            else:
+                j = random.randint(0, count - 1)
+                if j < val_size:
+                    reservoir[j] = stripped
+    with open(val_file, "w", encoding="latin-1") as f:
+        for line in reservoir:
+            f.write(line + "\n")
+
+def load_val_lines(val_file):
+    lines = []
+    with open(val_file, "r", encoding="latin-1") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+    return lines
+
+def stream_train_lines(train_file, target_count):
+    selected = []
+    seen = set()
+    total = 0
+    with open(train_file, "r", encoding="latin-1") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            total += 1
+            if len(selected) < target_count:
+                selected.append(stripped)
+                seen.add(stripped)
+            else:
+                j = random.randint(0, total - 1)
+                if j < target_count:
+                    replaced = selected[j]
+                    selected[j] = stripped
+                    seen.add(stripped)
+    return selected, len(seen)
+
+if not os.path.exists(val_file):
+    print("Creating validation file...")
+    create_val_file(train_file, val_file, val_size)
+
+val_lines = load_val_lines(val_file)
+
 vocab, vocab_size = build_vocab(train_file)
 model = WhitespaceCorrector(vocab_size)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-val_lines = []
-with open(train_file, "r", encoding="latin-1") as f:
-    for line in f:
-        stripped = line.strip()
-        if stripped:
-            val_lines.append(stripped)
-            if len(val_lines) >= val_size:
-                break
-
-def get_random_train_lines(num_lines):
-    all_lines = []
-    with open(train_file, "r", encoding="latin-1") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                all_lines.append(stripped)
-    random.shuffle(all_lines)
-    return all_lines[:num_lines]
-
 for epoch in range(num_epochs):
     model.train()
     print(f"Starting epoch {epoch+1}/{num_epochs}")
-    train_lines = get_random_train_lines(lines_per_epoch)
+    train_lines, unique_count = stream_train_lines(train_file, lines_per_epoch)
+    print(f"Unique lines this epoch: {unique_count}/{lines_per_epoch}")
     progress_bar = tqdm(total=len(train_lines), desc=f"Epoch {epoch+1} training", unit="lines")
     batch_lines = []
     for line in train_lines:
@@ -148,4 +187,3 @@ for epoch in range(num_epochs):
 
 torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector.pth")
 print("Training finished and model saved")
-
