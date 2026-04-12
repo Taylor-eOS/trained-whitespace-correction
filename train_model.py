@@ -1,20 +1,19 @@
 import torch
 import random
-import os
 from tqdm import tqdm
+from utils import create_val_set
 
 train_file = "train.txt"
-val_file = "val.txt"
-val_size = 10000
+val_size = 300
 embedding_dim = 64
 hidden_dim = 128
 num_layers = 2
 learning_rate = 0.001
-num_epochs = 5
+num_epochs = 10
 batch_size = 16
 max_length = 300
 pad_token = "<pad>"
-lines_per_epoch = 4000
+lines_per_epoch = 3000
 
 def build_vocab(train_file):
     with open(train_file, "r", encoding="latin-1") as f:
@@ -75,42 +74,14 @@ class WhitespaceCorrector(torch.nn.Module):
         logits = self.linear(lstm_out)
         return logits.squeeze(-1)
 
-def create_val_file(train_file, val_file, val_size):
-    reservoir = []
-    count = 0
-    with open(train_file, "r", encoding="latin-1") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            count += 1
-            if len(reservoir) < val_size:
-                reservoir.append(stripped)
-            else:
-                j = random.randint(0, count - 1)
-                if j < val_size:
-                    reservoir[j] = stripped
-    with open(val_file, "w", encoding="latin-1") as f:
-        for line in reservoir:
-            f.write(line + "\n")
-
-def load_val_lines(val_file):
-    lines = []
-    with open(val_file, "r", encoding="latin-1") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                lines.append(stripped)
-    return lines
-
-def stream_train_lines(train_file, target_count):
+def stream_train_lines(train_file, target_count, val_set):
     selected = []
     seen = set()
     total = 0
     with open(train_file, "r", encoding="latin-1") as f:
         for line in f:
             stripped = line.strip()
-            if not stripped:
+            if not stripped or stripped in val_set:
                 continue
             total += 1
             if len(selected) < target_count:
@@ -119,27 +90,15 @@ def stream_train_lines(train_file, target_count):
             else:
                 j = random.randint(0, total - 1)
                 if j < target_count:
-                    replaced = selected[j]
                     selected[j] = stripped
                     seen.add(stripped)
     return selected, len(seen)
 
-if not os.path.exists(val_file):
-    print("Creating validation file...")
-    create_val_file(train_file, val_file, val_size)
-
-val_lines = load_val_lines(val_file)
-
-vocab, vocab_size = build_vocab(train_file)
-model = WhitespaceCorrector(vocab_size)
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-for epoch in range(num_epochs):
+def train_epoch(model, optimizer, vocab, val_set):
     model.train()
-    print(f"Starting epoch {epoch+1}/{num_epochs}")
-    train_lines, unique_count = stream_train_lines(train_file, lines_per_epoch)
-    print(f"Unique lines this epoch: {unique_count}/{lines_per_epoch}")
-    progress_bar = tqdm(total=len(train_lines), desc=f"Epoch {epoch+1} training", unit="lines")
+    train_lines, unique_count = stream_train_lines(train_file, lines_per_epoch, val_set)
+    print(f"Unique lines: {unique_count}")
+    progress_bar = tqdm(total=len(train_lines), desc="Training", unit="lines")
     batch_lines = []
     for line in train_lines:
         batch_lines.append(line)
@@ -149,7 +108,7 @@ for epoch in range(num_epochs):
                 logits = model(input_padded)
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, reduction="none")
                 mask = (input_padded != vocab[pad_token]).float()
-                loss = (loss * mask).mean()
+                loss = (loss * mask).sum() / mask.sum()
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -161,13 +120,14 @@ for epoch in range(num_epochs):
             logits = model(input_padded)
             loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, reduction="none")
             mask = (input_padded != vocab[pad_token]).float()
-            loss = (loss * mask).mean()
+            loss = (loss * mask).sum() / mask.sum()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         progress_bar.update(len(batch_lines))
     progress_bar.close()
-    print("Training finished. Running validation...")
+
+def validate(model, vocab, val_lines):
     model.eval()
     total_f1 = 0.0
     num_batches = 0
@@ -182,8 +142,22 @@ for epoch in range(num_epochs):
             f1 = compute_f1(logits, labels_padded, mask)
             total_f1 += f1
             num_batches += 1
-    avg_f1 = total_f1 / num_batches if num_batches > 0 else 0.0
-    print(f"Epoch {epoch+1} completed. Validation F1: {avg_f1:.4f}")
+    return total_f1 / num_batches if num_batches > 0 else 0.0
 
-torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector.pth")
-print("Training finished and model saved")
+def main():
+    val_set = create_val_set(train_file, val_size)
+    val_lines = list(val_set)
+    vocab, vocab_size = build_vocab(train_file)
+    model = WhitespaceCorrector(vocab_size)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    for epoch in range(num_epochs):
+        print(f"Starting epoch {epoch+1}/{num_epochs}")
+        train_epoch(model, optimizer, vocab, val_set)
+        print("Running validation...")
+        avg_f1 = validate(model, vocab, val_lines)
+        print(f"Epoch {epoch+1} completed. Validation F1: {avg_f1:.4f}")
+    torch.save({"model": model.state_dict(), "vocab": vocab}, "whitespace_corrector.pth")
+    print("Training finished and model saved")
+
+if __name__ == "__main__":
+    main()
