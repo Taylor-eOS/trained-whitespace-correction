@@ -2,7 +2,7 @@ import sys
 
 def main():
     input_file = "files/corpus.txt"
-    output_file = "train.txt"
+    output_file = "corpus.txt"
     target_mb = int(input("Target MB: "))
     target_bytes = target_mb * 1024 * 1024
     written = 0

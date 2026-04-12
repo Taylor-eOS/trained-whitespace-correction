@@ -1,10 +1,11 @@
 import torch
 import random
 from tqdm import tqdm
-from utils import create_val_set
+#from utils import 
 
+val_file = "val.txt"
 train_file = "train.txt"
-val_size = 300
+val_size = 100
 embedding_dim = 64
 hidden_dim = 128
 num_layers = 2
@@ -13,9 +14,9 @@ num_epochs = 10
 batch_size = 16
 max_length = 300
 pad_token = "<pad>"
-lines_per_epoch = 3000
+lines_per_epoch = 1000
 
-def build_vocab(train_file):
+def build_vocab():
     with open(train_file, "r", encoding="latin-1") as f:
         text = f.read()
     chars = sorted(set(text))
@@ -74,32 +75,37 @@ class WhitespaceCorrector(torch.nn.Module):
         logits = self.linear(lstm_out)
         return logits.squeeze(-1)
 
-def stream_train_lines(train_file, target_count, val_set):
+def stream_train_lines(target_count):
     selected = []
-    seen = set()
-    total = 0
-    with open(train_file, "r", encoding="latin-1") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped in val_set:
-                continue
-            total += 1
-            if len(selected) < target_count:
+    with open(train_file, "rb") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+        while len(selected) < target_count:
+            pos = random.randint(0, file_size - 1)
+            f.seek(pos)
+            f.readline()
+            for _ in range(5):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    stripped = line.decode("latin-1").strip()
+                except Exception:
+                    continue
+                if not stripped:
+                    continue
                 selected.append(stripped)
-                seen.add(stripped)
-            else:
-                j = random.randint(0, total - 1)
-                if j < target_count:
-                    selected[j] = stripped
-                    seen.add(stripped)
-    return selected, len(seen)
+                if len(selected) >= target_count:
+                    break
+    return selected
 
-def train_epoch(model, optimizer, vocab, val_set):
+def train_epoch(model, optimizer, vocab):
     model.train()
-    train_lines, unique_count = stream_train_lines(train_file, lines_per_epoch, val_set)
-    print(f"Unique lines: {unique_count}")
+    train_lines = stream_train_lines(lines_per_epoch)
     progress_bar = tqdm(total=len(train_lines), desc="Training", unit="lines")
     batch_lines = []
+    total_loss = 0.0
+    total_tokens = 0.0
     for line in train_lines:
         batch_lines.append(line)
         if len(batch_lines) == batch_size:
@@ -108,10 +114,14 @@ def train_epoch(model, optimizer, vocab, val_set):
                 logits = model(input_padded)
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, reduction="none")
                 mask = (input_padded != vocab[pad_token]).float()
-                loss = (loss * mask).sum() / mask.sum()
+                loss_sum = (loss * mask).sum()
+                token_count = mask.sum()
+                loss_mean = loss_sum / token_count
                 optimizer.zero_grad()
-                loss.backward()
+                loss_mean.backward()
                 optimizer.step()
+                total_loss += loss_sum.item()
+                total_tokens += token_count.item()
             batch_lines = []
             progress_bar.update(batch_size)
     if batch_lines:
@@ -120,20 +130,27 @@ def train_epoch(model, optimizer, vocab, val_set):
             logits = model(input_padded)
             loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, reduction="none")
             mask = (input_padded != vocab[pad_token]).float()
-            loss = (loss * mask).sum() / mask.sum()
+            loss_sum = (loss * mask).sum()
+            token_count = mask.sum()
+            loss_mean = loss_sum / token_count
             optimizer.zero_grad()
-            loss.backward()
+            loss_mean.backward()
             optimizer.step()
+            total_loss += loss_sum.item()
+            total_tokens += token_count.item()
         progress_bar.update(len(batch_lines))
     progress_bar.close()
+    avg_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
+    return avg_loss
 
 def validate(model, vocab, val_lines):
     model.eval()
     total_f1 = 0.0
     num_batches = 0
+    sample = random.sample(val_lines, min(val_size, len(val_lines)))
     with torch.no_grad():
-        for start in range(0, len(val_lines), batch_size):
-            batch_lines = val_lines[start:start + batch_size]
+        for start in range(0, len(sample), batch_size):
+            batch_lines = sample[start:start + batch_size]
             input_padded, labels_padded = prepare_batch(batch_lines, vocab, max_length)
             if input_padded is None:
                 continue
@@ -145,14 +162,15 @@ def validate(model, vocab, val_lines):
     return total_f1 / num_batches if num_batches > 0 else 0.0
 
 def main():
-    val_set = create_val_set(train_file, val_size)
-    val_lines = list(val_set)
-    vocab, vocab_size = build_vocab(train_file)
+    with open(val_file, "r", encoding="latin-1") as f:
+        val_lines = [line.strip() for line in f if line.strip()]
+    vocab, vocab_size = build_vocab()
     model = WhitespaceCorrector(vocab_size)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     for epoch in range(num_epochs):
         print(f"Starting epoch {epoch+1}/{num_epochs}")
-        train_epoch(model, optimizer, vocab, val_set)
+        train_loss = train_epoch(model, optimizer, vocab)
+        print(f"Training loss: {train_loss:.6f}")
         print("Running validation...")
         avg_f1 = validate(model, vocab, val_lines)
         print(f"Epoch {epoch+1} completed. Validation F1: {avg_f1:.4f}")
@@ -161,3 +179,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
