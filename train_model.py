@@ -161,9 +161,24 @@ def validate(model, vocab, val_lines):
             num_batches += 1
     return total_f1 / num_batches if num_batches > 0 else 0.0
 
+def load_val_sample(val_size):
+    reservoir = []
+    with open(val_file, "r", encoding="latin-1") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            if len(reservoir) < val_size:
+                reservoir.append(line)
+            else:
+                j = random.randint(0, i)
+                if j < val_size:
+                    reservoir[j] = line
+    return reservoir
+
 def main():
     with open(val_file, "r", encoding="latin-1") as f:
-        val_lines = [line.strip() for line in f if line.strip()]
+        val_lines = load_val_sample(val_size)
     vocab, vocab_size = build_vocab()
     model = WhitespaceCorrector(vocab_size)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
