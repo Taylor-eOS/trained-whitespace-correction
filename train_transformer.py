@@ -10,6 +10,7 @@ vocab_file = "vocab.pth"
 val_size = 300
 embedding_dim = 128
 kind_embedding_dim = 16
+space_embedding_dim = 8
 d_model = 256
 nhead = 8
 num_layers = 4
@@ -28,7 +29,8 @@ scheduler_patience = 4
 scheduler_factor = 0.5
 validation_ema_beta = 0.5
 threshold_grid = np.linspace(0.05, 0.95, 19)
-space_injection_prob = 0.03
+space_noise_add_prob = 0.08
+space_noise_remove_prob = 0.05
 num_threads = 12
 pad_id = None
 unk_id = None
@@ -38,7 +40,8 @@ class WhitespaceCorrector(torch.nn.Module):
         super().__init__()
         self.char_embedding = torch.nn.Embedding(char_vocab_size, embedding_dim, padding_idx=pad_id)
         self.kind_embedding = torch.nn.Embedding(7, kind_embedding_dim)
-        self.input_proj = torch.nn.Linear(embedding_dim + kind_embedding_dim, d_model)
+        self.space_embedding = torch.nn.Embedding(2, space_embedding_dim)
+        self.input_proj = torch.nn.Linear(embedding_dim + kind_embedding_dim + space_embedding_dim, d_model)
         self.pos_embedding = torch.nn.Embedding(max_length, d_model)
         encoder_layer = torch.nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -59,51 +62,60 @@ class WhitespaceCorrector(torch.nn.Module):
         torch.nn.init.constant_(self.head.bias, head_bias_init)
         self.register_buffer("kind_lookup", kind_lookup, persistent=False)
 
-    def forward(self, x):
+    def forward(self, x, space_flags):
         B, L = x.shape
         pad_mask = (x == pad_id)
         kind_ids = self.kind_lookup[x]
         char_emb = self.char_embedding(x)
         kind_emb = self.kind_embedding(kind_ids)
+        space_emb = self.space_embedding(space_flags)
         pos_emb = self.pos_embedding(torch.arange(L, device=x.device).unsqueeze(0))
-        out = self.input_proj(torch.cat([char_emb, kind_emb], dim=-1)) + pos_emb
+        out = self.input_proj(torch.cat([char_emb, kind_emb, space_emb], dim=-1)) + pos_emb
         out = self.transformer(out, src_key_padding_mask=pad_mask)
         out = self.head_drop(out)
         return self.head(out).squeeze(-1)
 
 def prepare_batch(batch_lines, vocab, augment):
     inputs = []
+    space_flags_list = []
     labels = []
-    space_id = vocab.get(" ", unk_id)
     for line in batch_lines:
         chars = []
-        targets = []
-        i = 0
-        while i < len(line):
-            ch = line[i]
+        flags = []
+        preceded_by_space = False
+        for ch in line:
             if ch == " ":
-                if len(targets) > 0:
-                    targets[-1] = 1.0
-                i += 1
+                preceded_by_space = True
                 continue
-            if augment and random.random() < space_injection_prob:
-                chars.append(space_id)
-                targets.append(1.0)
-            ch_id = vocab.get(ch, unk_id)
-            chars.append(ch_id)
-            targets.append(0.0)
-            i += 1
+            chars.append(vocab.get(ch, unk_id))
+            flags.append(1 if preceded_by_space else 0)
+            preceded_by_space = False
+        if augment:
+            for j in range(len(flags)):
+                if flags[j] == 0 and random.random() < space_noise_add_prob:
+                    flags[j] = 1
+                elif flags[j] == 1 and random.random() < space_noise_remove_prob:
+                    flags[j] = 0
+        targets = [0.0] * len(chars)
+        for j in range(len(targets) - 1):
+            if flags[j + 1] == 1:
+                targets[j] = 1.0
+        if flags and flags[0] == 1:
+            flags[0] = 0
         chars = chars[:max_length]
+        flags = flags[:max_length]
         targets = targets[:max_length]
         if len(chars) == 0:
             continue
         inputs.append(torch.tensor(chars, dtype=torch.long))
+        space_flags_list.append(torch.tensor(flags, dtype=torch.long))
         labels.append(torch.tensor(targets, dtype=torch.float32))
     if not inputs:
-        return None, None
+        return None, None, None
     input_padded = torch.nn.utils.rnn.pad_sequence(inputs, batch_first=True, padding_value=pad_id)
+    flags_padded = torch.nn.utils.rnn.pad_sequence(space_flags_list, batch_first=True, padding_value=0)
     labels_padded = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=0.0)
-    return input_padded, labels_padded
+    return input_padded, flags_padded, labels_padded
 
 def _counts_from_predictions(preds, labels):
     tp = int(np.sum((preds == 1) & (labels == 1)))
@@ -122,15 +134,18 @@ def estimate_positive_rate(lines, vocab, n_samples=2000):
     total_tokens = 0
     total_positives = 0
     for line in sampled:
-        chars = []
-        targets = []
+        flags = []
+        preceded_by_space = False
         for ch in line:
             if ch == " ":
-                if len(targets) > 0:
-                    targets[-1] = 1.0
+                preceded_by_space = True
                 continue
-            chars.append(vocab.get(ch, unk_id))
-            targets.append(0.0)
+            flags.append(1 if preceded_by_space else 0)
+            preceded_by_space = False
+        targets = [0.0] * len(flags)
+        for j in range(len(targets) - 1):
+            if flags[j + 1] == 1:
+                targets[j] = 1.0
         total_tokens += len(targets)
         total_positives += sum(targets)
     if total_tokens == 0:
@@ -145,10 +160,10 @@ def train_epoch(model, optimizer, train_lines, vocab, pos_weight):
     for start in range(0, len(indices), batch_size):
         batch_idx = indices[start:start + batch_size]
         batch_lines = [train_lines[i] for i in batch_idx]
-        input_padded, labels_padded = prepare_batch(batch_lines, vocab, augment=True)
+        input_padded, flags_padded, labels_padded = prepare_batch(batch_lines, vocab, augment=True)
         if input_padded is None:
             continue
-        logits = model(input_padded)
+        logits = model(input_padded, flags_padded)
         mask = (input_padded != pad_id).float()
         loss = torch.nn.functional.binary_cross_entropy_with_logits(
             logits, labels_padded, pos_weight=pos_weight, reduction="none"
@@ -173,10 +188,10 @@ def evaluate(model, vocab, val_lines):
     with torch.inference_mode():
         for start in range(0, len(sampled_lines), batch_size):
             batch_lines = sampled_lines[start:start + batch_size]
-            input_padded, labels_padded = prepare_batch(batch_lines, vocab, augment=False)
+            input_padded, flags_padded, labels_padded = prepare_batch(batch_lines, vocab, augment=False)
             if input_padded is None:
                 continue
-            logits = model(input_padded)
+            logits = model(input_padded, flags_padded)
             mask = (input_padded != pad_id)
             probs = torch.sigmoid(logits)[mask].detach().cpu().numpy()
             labels = labels_padded[mask].detach().cpu().numpy().astype(np.int32)
@@ -236,7 +251,7 @@ def main():
             for g in optimizer.param_groups:
                 g["lr"] = learning_rate * warmup_factor
         current_lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch + 1}/{num_epochs}  lr={current_lr:.2e}")
+        print(f"Epoch {epoch + 1}/{num_epochs}, lr: {current_lr:.2e}")
         train_loss = train_epoch(model, optimizer, train_lines, vocab, pos_weight)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
