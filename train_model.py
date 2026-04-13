@@ -166,12 +166,13 @@ def train_epoch(model, optimizer, train_lines, vocab):
 
 def evaluate(model, vocab, val_lines):
     model.eval()
+    sampled_lines = random.sample(val_lines, min(val_size, len(val_lines)))
     all_probs = []
     all_labels = []
     space_id = vocab.get(" ", unk_id)
     with torch.inference_mode():
-        for start in range(0, len(val_lines), batch_size):
-            batch_lines = val_lines[start:start + batch_size]
+        for start in range(0, len(sampled_lines), batch_size):
+            batch_lines = sampled_lines[start:start + batch_size]
             input_padded, labels_padded = prepare_augmented_batch(batch_lines, vocab)
             if input_padded is None: continue
             logits = model(input_padded)
@@ -209,8 +210,6 @@ def main():
     unk_id = vocab.get("<unk>", pad_id)
     train_lines = load_text_lines(train_file)
     val_lines = load_text_lines(val_file)
-    if len(val_lines) > val_size:
-        val_lines = random.sample(val_lines, val_size)
     vocab_size = max(vocab.values()) + 1 if isinstance(vocab, dict) else len(vocab)
     kind_lookup = build_kind_lookup(vocab)
     model = WhitespaceCorrector(vocab_size, kind_lookup)
@@ -232,9 +231,9 @@ def main():
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
-            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace_corrector.pth")
+            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
             print(f"New best: {best_f1:.4f}")
-    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace_corrector.pth")
+    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
     print(f"Training finished. Best validation F1: {best_f1:.4f}")
 
 if __name__ == "__main__":
