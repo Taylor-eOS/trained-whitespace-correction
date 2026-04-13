@@ -12,23 +12,23 @@ embedding_dim = 128
 kind_embedding_dim = 16
 d_model = 256
 nhead = 8
-num_layers = 6
-dim_feedforward = 1024
+num_layers = 4
+dim_feedforward = 768
 head_dropout = 0.1
 dropout = 0.1
 learning_rate = 3e-4
 weight_decay = 1e-2
-num_epochs = 40
+num_epochs = 100
 warmup_epochs = 4
-batch_size = 16
+batch_size = 32
 max_length = 400
 pad_token = "<pad>"
-lines_per_epoch = 500
+lines_per_epoch = 1000
 scheduler_patience = 4
 scheduler_factor = 0.5
-validation_ema_beta = 0.8
+validation_ema_beta = 0.5
 threshold_grid = np.linspace(0.05, 0.95, 19)
-space_injection_prob = 0.10
+space_injection_prob = 0.03
 num_threads = 12
 pad_id = None
 unk_id = None
@@ -137,7 +137,7 @@ def estimate_positive_rate(lines, vocab, n_samples=2000):
         return 0.5
     return total_positives / total_tokens
 
-def train_epoch(model, optimizer, train_lines, vocab):
+def train_epoch(model, optimizer, train_lines, vocab, pos_weight):
     model.train()
     indices = random.sample(range(len(train_lines)), min(lines_per_epoch, len(train_lines)))
     total_loss = 0.0
@@ -150,9 +150,6 @@ def train_epoch(model, optimizer, train_lines, vocab):
             continue
         logits = model(input_padded)
         mask = (input_padded != pad_id).float()
-        pos_count = (labels_padded * mask).sum()
-        neg_count = ((1.0 - labels_padded) * mask).sum()
-        pos_weight = (neg_count / pos_count) if pos_count > 0 else torch.ones(1, device=logits.device)
         loss = torch.nn.functional.binary_cross_entropy_with_logits(
             logits, labels_padded, pos_weight=pos_weight, reduction="none"
         )
@@ -227,6 +224,7 @@ def main():
     print(f"Model parameters: {total_params:,}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+    pos_weight = torch.tensor([(1.0 - pos_rate) / pos_rate], device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=scheduler_factor, patience=scheduler_patience)
     best_f1 = 0.0
@@ -239,7 +237,7 @@ def main():
                 g["lr"] = learning_rate * warmup_factor
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch + 1}/{num_epochs}  lr={current_lr:.2e}")
-        train_loss = train_epoch(model, optimizer, train_lines, vocab)
+        train_loss = train_epoch(model, optimizer, train_lines, vocab, pos_weight)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
         print(f"Loss: {train_loss:.3f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.2f}, best threshold: {epoch_threshold:.2f}, precision: {precision:.2f}, recall: {recall:.2f}")
@@ -255,4 +253,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
