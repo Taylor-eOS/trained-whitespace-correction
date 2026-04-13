@@ -18,7 +18,7 @@ head_dropout = 0.1
 dropout = 0.1
 learning_rate = 3e-4
 weight_decay = 1e-2
-num_epochs = 50
+num_epochs = 40
 warmup_epochs = 4
 batch_size = 16
 max_length = 400
@@ -106,6 +106,32 @@ def _metrics_from_counts(tp, fp, fn):
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     return precision, recall, f1
 
+def prepare_batch(lines, vocab):
+    inputs = []
+    labels = []
+    for line in lines:
+        chars = []
+        targets = []
+        for i, ch in enumerate(line):
+            if ch == " ":
+                if len(targets) > 0:
+                    targets[-1] = 1.0
+                continue
+            ch_id = vocab.get(ch, unk_id)
+            chars.append(ch_id)
+            targets.append(0.0)
+        chars = chars[:max_length]
+        targets = targets[:max_length]
+        if len(chars) == 0:
+            continue
+        inputs.append(torch.tensor(chars, dtype=torch.long))
+        labels.append(torch.tensor(targets, dtype=torch.float32))
+    if not inputs:
+        return None, None
+    input_padded = torch.nn.utils.rnn.pad_sequence(inputs, batch_first=True, padding_value=pad_id)
+    labels_padded = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=0.0)
+    return input_padded, labels_padded
+
 def train_epoch(model, optimizer, train_lines, vocab):
     model.train()
     indices = random.sample(range(len(train_lines)), min(lines_per_epoch, len(train_lines)))
@@ -114,14 +140,15 @@ def train_epoch(model, optimizer, train_lines, vocab):
     for start in range(0, len(indices), batch_size):
         batch_idx = indices[start:start + batch_size]
         batch_lines = [train_lines[i] for i in batch_idx]
-        input_padded, labels_padded = prepare_augmented_batch(batch_lines, vocab)
-        if input_padded is None: continue
+        input_padded, labels_padded = prepare_batch(batch_lines, vocab)
+        if input_padded is None:
+            continue
         logits = model(input_padded)
         mask = (input_padded != pad_id).float()
         pos_count = (labels_padded * mask).sum()
         neg_count = ((1.0 - labels_padded) * mask).sum()
-        batch_pos_weight = (neg_count / pos_count).clamp(max=15.0) if pos_count > 0 else torch.tensor(1.0, device=logits.device)
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, pos_weight=batch_pos_weight, reduction="none")
+        pos_weight = (neg_count / pos_count).clamp(max=10.0) if pos_count > 0 else torch.tensor(1.0, device=logits.device)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, pos_weight=pos_weight, reduction="none")
         loss_sum = (loss * mask).sum()
         token_count = mask.sum()
         if token_count > 0:
@@ -139,20 +166,22 @@ def evaluate(model, vocab, val_lines):
     sampled_lines = random.sample(val_lines, min(val_size, len(val_lines)))
     all_probs = []
     all_labels = []
-    space_id = vocab.get(" ", unk_id)
     with torch.inference_mode():
         for start in range(0, len(sampled_lines), batch_size):
             batch_lines = sampled_lines[start:start + batch_size]
-            input_padded, labels_padded = prepare_augmented_batch(batch_lines, vocab)
-            if input_padded is None: continue
+            input_padded, labels_padded = prepare_batch(batch_lines, vocab)
+            if input_padded is None:
+                continue
             logits = model(input_padded)
-            mask = (input_padded == space_id)
+            mask = (input_padded != pad_id)
             probs = torch.sigmoid(logits)[mask].detach().cpu().numpy()
             labels = labels_padded[mask].detach().cpu().numpy().astype(np.int32)
-            if probs.size == 0: continue
+            if probs.size == 0:
+                continue
             all_probs.append(probs)
             all_labels.append(labels)
-    if not all_probs: return 0.0, 0.0, 0.5, 0.0, 0.0, 0.0
+    if not all_probs:
+        return 0.0, 0.0, 0.5, 0.0, 0.0, 0.0
     probs = np.concatenate(all_probs)
     labels = np.concatenate(all_labels)
     raw_preds = (probs >= 0.5).astype(np.int32)
@@ -202,7 +231,7 @@ def main():
         train_loss = train_epoch(model, optimizer, train_lines, vocab)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
-        print(f"Loss: {train_loss:.4f}, F1@0.5: {raw_f1:.4f}, Best F1: {best_epoch_f1:.4f}, Best thr: {epoch_threshold:.2f}, Precision: {precision:.4f}, Recall: {recall:.4f}")
+        print(f"Loss: {train_loss:.2f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.2f}, best threshold: {epoch_threshold:.2f}, precision: {precision:.2f}, recall: {recall:.2f}")
         if epoch >= warmup_epochs:
             scheduler.step(ema_val)
         if best_epoch_f1 > best_f1:
