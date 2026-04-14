@@ -3,10 +3,8 @@ import string
 import numpy as np
 import torch
 from common import _token_kind, build_kind_lookup, load_text_lines
+from settings import train_file, val_file, vocab_file
 
-train_file = "train.txt"
-val_file = "val.txt"
-vocab_file = "vocab.pth"
 val_size = 300
 embedding_dim = 128
 kind_embedding_dim = 16

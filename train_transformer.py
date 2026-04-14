@@ -3,10 +3,8 @@ import string
 import numpy as np
 import torch
 from common import _token_kind, build_kind_lookup, load_text_lines
+from settings import train_file, val_file, vocab_file
 
-train_file = "train.txt"
-val_file = "val.txt"
-vocab_file = "vocab.pth"
 val_size = 300
 embedding_dim = 128
 kind_embedding_dim = 16
@@ -75,7 +73,7 @@ class WhitespaceCorrector(torch.nn.Module):
         out = self.head_drop(out)
         return self.head(out).squeeze(-1)
 
-def prepare_batch(batch_lines, vocab, augment):
+def prepare_batch(batch_lines, vocab, apply_noise):
     inputs = []
     space_flags_list = []
     labels = []
@@ -90,16 +88,16 @@ def prepare_batch(batch_lines, vocab, augment):
             chars.append(vocab.get(ch, unk_id))
             flags.append(1 if preceded_by_space else 0)
             preceded_by_space = False
-        if augment:
+        targets = [0.0] * len(chars)
+        for j in range(len(targets) - 1):
+            if flags[j + 1] == 1:
+                targets[j] = 1.0
+        if apply_noise:
             for j in range(len(flags)):
                 if flags[j] == 0 and random.random() < space_noise_add_prob:
                     flags[j] = 1
                 elif flags[j] == 1 and random.random() < space_noise_remove_prob:
                     flags[j] = 0
-        targets = [0.0] * len(chars)
-        for j in range(len(targets) - 1):
-            if flags[j + 1] == 1:
-                targets[j] = 1.0
         if flags and flags[0] == 1:
             flags[0] = 0
         chars = chars[:max_length]
@@ -160,7 +158,7 @@ def train_epoch(model, optimizer, train_lines, vocab, pos_weight):
     for start in range(0, len(indices), batch_size):
         batch_idx = indices[start:start + batch_size]
         batch_lines = [train_lines[i] for i in batch_idx]
-        input_padded, flags_padded, labels_padded = prepare_batch(batch_lines, vocab, augment=True)
+        input_padded, flags_padded, labels_padded = prepare_batch(batch_lines, vocab, apply_noise=True)
         if input_padded is None:
             continue
         logits = model(input_padded, flags_padded)
@@ -188,7 +186,7 @@ def evaluate(model, vocab, val_lines):
     with torch.inference_mode():
         for start in range(0, len(sampled_lines), batch_size):
             batch_lines = sampled_lines[start:start + batch_size]
-            input_padded, flags_padded, labels_padded = prepare_batch(batch_lines, vocab, augment=False)
+            input_padded, flags_padded, labels_padded = prepare_batch(batch_lines, vocab, apply_noise=True)
             if input_padded is None:
                 continue
             logits = model(input_padded, flags_padded)
@@ -262,7 +260,7 @@ def main():
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
             torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
-            print(f"New best: {best_f1:.4f}")
+            print(f"New best: {best_f1:.2f}")
     torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
     print(f"Training finished. Best validation F1: {best_f1:.4f}")
 
