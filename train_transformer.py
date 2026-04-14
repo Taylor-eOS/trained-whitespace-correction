@@ -17,8 +17,6 @@ scheduler_factor = 0.5
 validation_ema_beta = 0.5
 threshold_grid = np.linspace(0.05, 0.95, 19)
 num_threads = 12
-pad_id = None
-unk_id = None
 
 def _counts_from_predictions(preds, labels):
     tp = int(np.sum((preds == 1) & (labels == 1)))
@@ -55,7 +53,7 @@ def estimate_positive_rate(lines, vocab, n_samples=2000):
         return 0.5
     return total_positives / total_tokens
 
-def train_epoch(model, optimizer, train_lines, vocab, pos_weight):
+def train_epoch(model, optimizer, train_lines, vocab, pad_id, unk_id, pos_weight):
     model.train()
     indices = random.sample(range(len(train_lines)), min(lines_per_epoch, len(train_lines)))
     total_loss = 0.0
@@ -85,7 +83,7 @@ def train_epoch(model, optimizer, train_lines, vocab, pos_weight):
             total_tokens += token_count.item()
     return total_loss / total_tokens if total_tokens > 0 else 0.0
 
-def evaluate(model, vocab, val_lines):
+def evaluate(model, vocab, pad_id, unk_id, val_lines):
     model.eval()
     sampled_lines = random.sample(val_lines, min(val_size, len(val_lines)))
     all_probs = []
@@ -94,7 +92,7 @@ def evaluate(model, vocab, val_lines):
         for start in range(0, len(sampled_lines), batch_size):
             batch_lines = sampled_lines[start:start + batch_size]
             input_padded, flags_padded, labels_padded, _ = prepare_batch(
-                batch_lines, vocab, unk_id, pad_id, apply_noise=True
+                batch_lines, vocab, unk_id, pad_id, apply_noise=False
             )
             if input_padded is None:
                 continue
@@ -125,7 +123,6 @@ def evaluate(model, vocab, val_lines):
     return raw_f1, best_f1, best_threshold, best_precision, best_recall, predicted_positive_rate
 
 def main():
-    global pad_id, unk_id
     torch.set_num_threads(num_threads)
     checkpoint = torch.load(vocab_file, map_location="cpu", weights_only=False)
     vocab = checkpoint["vocab"]
@@ -158,8 +155,8 @@ def main():
                 g["lr"] = learning_rate * warmup_factor
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch + 1}, lr: {current_lr:.2e}")
-        train_loss = train_epoch(model, optimizer, train_lines, vocab, pos_weight)
-        raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
+        train_loss = train_epoch(model, optimizer, train_lines, vocab, pad_id, unk_id, pos_weight)
+        raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, pad_id, unk_id, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
         if epoch >= warmup_epochs:
             scheduler.step(ema_val)
@@ -176,4 +173,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

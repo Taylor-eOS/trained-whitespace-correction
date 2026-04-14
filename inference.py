@@ -22,10 +22,9 @@ def main():
     input_path = input("Input file (input.txt): ") or "input.txt"
     base, ext = os.path.splitext(input_path)
     output_path = base + "_corrected" + ext
-    model, vocab, pad_id, unk_id, threshold = load_model(model_file_name, device)
+    model, vocab, unk_id, threshold = load_model(model_file_name, device)
     print(f"Loaded model (threshold={threshold:.3f})")
     correct_file(input_path, output_path, model, vocab, unk_id, threshold)
 
 if __name__ == "__main__":
     main()
-

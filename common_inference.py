@@ -133,10 +133,11 @@ def load_model(model_file, device):
     model.load_state_dict(checkpoint["model"])
     model.to(device)
     model.eval()
-    return model, vocab, pad_id, unk_id, threshold
+    return model, vocab, unk_id, threshold
 
 def correct_lines(model, lines, vocab, unk_id, threshold):
     corrected = []
+    device = next(model.parameters()).device
     with torch.inference_mode():
         for start in range(0, len(lines), batch_size):
             batch_lines = lines[start:start + batch_size]
@@ -144,7 +145,6 @@ def correct_lines(model, lines, vocab, unk_id, threshold):
             if input_padded is None:
                 corrected.extend([""] * len(batch_lines))
                 continue
-            device = next(model.parameters()).device
             input_padded = input_padded.to(device)
             flags_padded = flags_padded.to(device)
             labels_padded = labels_padded.to(device)
@@ -158,4 +158,3 @@ def correct_lines(model, lines, vocab, unk_id, threshold):
                         out.append(" ")
                 corrected.append("".join(out))
     return corrected
-
