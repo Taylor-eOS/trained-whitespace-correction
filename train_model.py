@@ -3,7 +3,7 @@ import string
 import numpy as np
 import torch
 from common import _token_kind, build_kind_lookup, load_text_lines
-from settings import train_file, val_file, vocab_file
+from settings import train_file, val_file, vocab_file, model_file_name
 
 val_size = 300
 embedding_dim = 128
@@ -198,9 +198,9 @@ def main():
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
-            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
+            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
             print(f"New best: {best_f1:.4f}")
-    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
+    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
     print(f"Training finished. Best validation F1: {best_f1:.4f}")
 
 if __name__ == "__main__":

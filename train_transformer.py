@@ -3,7 +3,7 @@ import string
 import numpy as np
 import torch
 from common import _token_kind, build_kind_lookup, load_text_lines
-from settings import train_file, val_file, vocab_file
+from settings import train_file, val_file, vocab_file, model_file_name
 
 val_size = 300
 embedding_dim = 128
@@ -248,22 +248,22 @@ def main():
             for g in optimizer.param_groups:
                 g["lr"] = learning_rate * warmup_factor
         current_lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch + 1}/{max_epochs}, lr: {current_lr:.2e}")
+        print(f"Epoch {epoch + 1}, lr: {current_lr:.2e}")
         train_loss = train_epoch(model, optimizer, train_lines, vocab, pos_weight)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
-        print(f"Loss: {train_loss:.3f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.4f}, best threshold: {epoch_threshold:.2f}, precision: {precision:.2f}, recall: {recall:.2f}")
+        print(f"Loss: {train_loss:.3f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.3f}, best thr: {epoch_threshold:.2f}, prec: {precision:.2f}, recall: {recall:.2f}")
         if epoch >= warmup_epochs:
             scheduler.step(ema_val)
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
-            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
-            print(f"New best: {best_f1:.4f}")
+            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
+            print(f"New best: {best_f1:.3f}")
         if best_epoch_f1 >= target_f1:
-            print(f"Reached target F1 of {target_f1:.4f} at epoch {epoch + 1}. Stopping training.")
+            print(f"Reached target F1 of {target_f1:.4f} at epoch {epoch + 1}.")
             break
-    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
+    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
     print(f"Training finished. Best validation F1: {best_f1:.4f}")
 
 if __name__ == "__main__":
