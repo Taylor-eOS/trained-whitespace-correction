@@ -28,8 +28,10 @@ scheduler_patience = 4
 scheduler_factor = 0.5
 validation_ema_beta = 0.5
 threshold_grid = np.linspace(0.05, 0.95, 19)
-space_noise_add_prob = 0.08
-space_noise_remove_prob = 0.05
+space_noise_add_prob_min = 0.01
+space_noise_add_prob_max = 0.08
+space_noise_remove_prob_min = 0.00
+space_noise_remove_prob_max = 0.04
 num_threads = 12
 pad_id = None
 unk_id = None
@@ -74,6 +76,11 @@ class WhitespaceCorrector(torch.nn.Module):
         out = self.head_drop(out)
         return self.head(out).squeeze(-1)
 
+def sample_noise_rates():
+    add_p = random.uniform(space_noise_add_prob_min, space_noise_add_prob_max)
+    remove_p = random.uniform(space_noise_remove_prob_min, space_noise_remove_prob_max)
+    return add_p, remove_p
+
 def prepare_batch(batch_lines, vocab, apply_noise):
     inputs = []
     space_flags_list = []
@@ -94,11 +101,14 @@ def prepare_batch(batch_lines, vocab, apply_noise):
             if flags[j + 1] == 1:
                 targets[j] = 1.0
         if apply_noise:
+            add_p, remove_p = sample_noise_rates()
             for j in range(len(flags)):
-                if flags[j] == 0 and random.random() < space_noise_add_prob:
-                    flags[j] = 1
-                elif flags[j] == 1 and random.random() < space_noise_remove_prob:
-                    flags[j] = 0
+                if flags[j] == 0:
+                    if random.random() < add_p:
+                        flags[j] = 1
+                else:
+                    if random.random() < remove_p:
+                        flags[j] = 0
         if flags and flags[0] == 1:
             flags[0] = 0
         chars = chars[:max_length]
@@ -252,19 +262,17 @@ def main():
         train_loss = train_epoch(model, optimizer, train_lines, vocab, pos_weight)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
-        print(f"Loss: {train_loss:.3f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.3f}, best thr: {epoch_threshold:.2f}, prec: {precision:.2f}, recall: {recall:.2f}")
+        print(f"Loss: {train_loss:.2f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.3f}, best thr: {epoch_threshold:.2f}, prec: {precision:.2f}, recall: {recall:.2f}")
         if epoch >= warmup_epochs:
             scheduler.step(ema_val)
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
             torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
-            print(f"New best: {best_f1:.3f}")
         if best_epoch_f1 >= target_f1:
             print(f"Reached target F1 of {target_f1:.4f} at epoch {epoch + 1}.")
             break
-    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
-    print(f"Training finished. Best validation F1: {best_f1:.4f}")
+    print(f"Training finished. Best validation F1: {best_f1:.3f}")
 
 if __name__ == "__main__":
     main()

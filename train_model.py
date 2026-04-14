@@ -193,15 +193,13 @@ def main():
         train_loss = train_epoch(model, optimizer, train_lines, vocab)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
-        print(f"Loss: {train_loss:.2f}, F1@0.5: {raw_f1:.2f}, Best F1: {best_epoch_f1:.2f}, Best thr: {epoch_threshold:.2f}, Precision: {precision:.2f}, Recall: {recall:.2f}")
+        print(f"Loss: {train_loss:.2f}, F1@0.5: {raw_f1:.2f}, Best F1: {best_epoch_f1:.3f}, Best thr: {epoch_threshold:.2f}, Precision: {precision:.2f}, Recall: {recall:.2f}")
         scheduler.step(ema_val)
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
             torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
-            print(f"New best: {best_f1:.4f}")
-    torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
-    print(f"Training finished. Best validation F1: {best_f1:.4f}")
+    print(f"Training finished. Best validation F1: {best_f1:.3f}")
 
 if __name__ == "__main__":
     main()
