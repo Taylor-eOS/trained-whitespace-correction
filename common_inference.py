@@ -57,7 +57,7 @@ class WhitespaceCorrector(torch.nn.Module):
         out = self.head_drop(out)
         return self.head(out).squeeze(-1)
 
-def prepare_batch(batch_lines, vocab, unk_id, pad_id, apply_noise, space_noise_add_prob_min=0.01, space_noise_add_prob_max=0.08, space_noise_remove_prob_min=0.00, space_noise_remove_prob_max=0.04):
+def prepare_batch(batch_lines, vocab, unk_id, pad_id, apply_noise, space_noise_add_prob_min=0.01, space_noise_add_prob_max=0.08, space_noise_remove_prob_min=0.00, space_noise_remove_prob_max=0.04, fixed_add_prob=None, fixed_remove_prob=None):
     inputs = []
     space_flags_list = []
     labels = []
@@ -80,8 +80,8 @@ def prepare_batch(batch_lines, vocab, unk_id, pad_id, apply_noise, space_noise_a
             if flags[j + 1] == 1:
                 targets[j] = 1.0
         if apply_noise:
-            add_p = random.uniform(space_noise_add_prob_min, space_noise_add_prob_max)
-            remove_p = random.uniform(space_noise_remove_prob_min, space_noise_remove_prob_max)
+            add_p = fixed_add_prob if fixed_add_prob is not None else random.uniform(space_noise_add_prob_min, space_noise_add_prob_max)
+            remove_p = fixed_remove_prob if fixed_remove_prob is not None else random.uniform(space_noise_remove_prob_min, space_noise_remove_prob_max)
             for j in range(len(flags)):
                 if flags[j] == 0:
                     if random.random() < add_p:

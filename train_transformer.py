@@ -17,6 +17,8 @@ scheduler_factor = 0.5
 validation_ema_beta = 0.5
 threshold_grid = np.linspace(0.05, 0.95, 19)
 num_threads = 12
+eval_noise_add_prob = 0.045
+eval_noise_remove_prob = 0.02
 
 def _counts_from_predictions(preds, labels):
     tp = int(np.sum((preds == 1) & (labels == 1)))
@@ -92,7 +94,8 @@ def evaluate(model, vocab, pad_id, unk_id, val_lines):
         for start in range(0, len(sampled_lines), batch_size):
             batch_lines = sampled_lines[start:start + batch_size]
             input_padded, flags_padded, labels_padded, _ = prepare_batch(
-                batch_lines, vocab, unk_id, pad_id, apply_noise=False
+                batch_lines, vocab, unk_id, pad_id, apply_noise=True,
+                fixed_add_prob=eval_noise_add_prob, fixed_remove_prob=eval_noise_remove_prob,
             )
             if input_padded is None:
                 continue
@@ -163,8 +166,9 @@ def main():
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
-            torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
             better_mark = "*"
+            if best_epoch_f1 > 0.8:
+                torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, model_file_name)
         print(f"Loss: {train_loss:.2f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.3f}{better_mark}, best thr: {epoch_threshold:.2f}, prec: {precision:.2f}, recall: {recall:.2f}")
         if best_epoch_f1 >= target_f1:
             print(f"Reached target F1 of {target_f1:.3f} at epoch {epoch + 1}.")
