@@ -17,7 +17,8 @@ head_dropout = 0.1
 dropout = 0.1
 learning_rate = 3e-4
 weight_decay = 1e-2
-num_epochs = 100
+max_epochs = 500
+target_f1 = 0.996
 warmup_epochs = 4
 batch_size = 32
 max_length = 400
@@ -163,9 +164,7 @@ def train_epoch(model, optimizer, train_lines, vocab, pos_weight):
             continue
         logits = model(input_padded, flags_padded)
         mask = (input_padded != pad_id).float()
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(
-            logits, labels_padded, pos_weight=pos_weight, reduction="none"
-        )
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels_padded, pos_weight=pos_weight, reduction="none")
         loss_sum = (loss * mask).sum()
         token_count = mask.sum()
         if token_count > 0:
@@ -243,26 +242,30 @@ def main():
     best_f1 = 0.0
     ema_val = None
     best_threshold = 0.5
-    for epoch in range(num_epochs):
+    for epoch in range(max_epochs):
         if epoch < warmup_epochs:
             warmup_factor = (epoch + 1) / warmup_epochs
             for g in optimizer.param_groups:
                 g["lr"] = learning_rate * warmup_factor
         current_lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch + 1}/{num_epochs}, lr: {current_lr:.2e}")
+        print(f"Epoch {epoch + 1}/{max_epochs}, lr: {current_lr:.2e}")
         train_loss = train_epoch(model, optimizer, train_lines, vocab, pos_weight)
         raw_f1, best_epoch_f1, epoch_threshold, precision, recall, positive_rate = evaluate(model, vocab, val_lines)
         ema_val = best_epoch_f1 if ema_val is None else validation_ema_beta * ema_val + (1.0 - validation_ema_beta) * best_epoch_f1
-        print(f"Loss: {train_loss:.3f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.2f}, best threshold: {epoch_threshold:.2f}, precision: {precision:.2f}, recall: {recall:.2f}")
+        print(f"Loss: {train_loss:.3f}, F1@0.5: {raw_f1:.2f}, best F1: {best_epoch_f1:.4f}, best threshold: {epoch_threshold:.2f}, precision: {precision:.2f}, recall: {recall:.2f}")
         if epoch >= warmup_epochs:
             scheduler.step(ema_val)
         if best_epoch_f1 > best_f1:
             best_f1 = best_epoch_f1
             best_threshold = epoch_threshold
             torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
-            print(f"New best: {best_f1:.2f}")
+            print(f"New best: {best_f1:.4f}")
+        if best_epoch_f1 >= target_f1:
+            print(f"Reached target F1 of {target_f1:.4f} at epoch {epoch + 1}. Stopping training.")
+            break
     torch.save({"model": model.state_dict(), "vocab": vocab, "threshold": best_threshold, "best_f1": best_f1}, "whitespace.pth")
     print(f"Training finished. Best validation F1: {best_f1:.4f}")
 
 if __name__ == "__main__":
     main()
+
