@@ -57,7 +57,15 @@ class WhitespaceCorrector(torch.nn.Module):
         out = self.head_drop(out)
         return self.head(out).squeeze(-1)
 
-def prepare_batch(batch_lines, vocab, unk_id, pad_id, apply_noise, space_noise_add_prob_min=0.01, space_noise_add_prob_max=0.08, space_noise_remove_prob_min=0.00, space_noise_remove_prob_max=0.04, fixed_add_prob=None, fixed_remove_prob=None):
+def prepare_batch(
+    batch_lines, vocab, unk_id, pad_id, apply_noise,
+    mild_add_prob_min=0.01, mild_add_prob_max=0.08,
+    mild_remove_prob_min=0.00, mild_remove_prob_max=0.04,
+    heavy_add_prob_min=0.05, heavy_add_prob_max=0.30,
+    heavy_remove_prob_min=0.20, heavy_remove_prob_max=0.80,
+    strip_prob=0.20, heavy_prob=0.20,
+    fixed_add_prob=None, fixed_remove_prob=None,
+):
     inputs = []
     space_flags_list = []
     labels = []
@@ -80,15 +88,41 @@ def prepare_batch(batch_lines, vocab, unk_id, pad_id, apply_noise, space_noise_a
             if flags[j + 1] == 1:
                 targets[j] = 1.0
         if apply_noise:
-            add_p = fixed_add_prob if fixed_add_prob is not None else random.uniform(space_noise_add_prob_min, space_noise_add_prob_max)
-            remove_p = fixed_remove_prob if fixed_remove_prob is not None else random.uniform(space_noise_remove_prob_min, space_noise_remove_prob_max)
-            for j in range(len(flags)):
-                if flags[j] == 0:
-                    if random.random() < add_p:
-                        flags[j] = 1
-                else:
-                    if random.random() < remove_p:
+            if fixed_add_prob is not None and fixed_remove_prob is not None:
+                add_p = fixed_add_prob
+                remove_p = fixed_remove_prob
+                for j in range(len(flags)):
+                    if flags[j] == 0:
+                        if random.random() < add_p:
+                            flags[j] = 1
+                    else:
+                        if random.random() < remove_p:
+                            flags[j] = 0
+            else:
+                regime = random.random()
+                if regime < strip_prob:
+                    for j in range(len(flags)):
                         flags[j] = 0
+                elif regime < strip_prob + heavy_prob:
+                    add_p = random.uniform(heavy_add_prob_min, heavy_add_prob_max)
+                    remove_p = random.uniform(heavy_remove_prob_min, heavy_remove_prob_max)
+                    for j in range(len(flags)):
+                        if flags[j] == 0:
+                            if random.random() < add_p:
+                                flags[j] = 1
+                        else:
+                            if random.random() < remove_p:
+                                flags[j] = 0
+                else:
+                    add_p = random.uniform(mild_add_prob_min, mild_add_prob_max)
+                    remove_p = random.uniform(mild_remove_prob_min, mild_remove_prob_max)
+                    for j in range(len(flags)):
+                        if flags[j] == 0:
+                            if random.random() < add_p:
+                                flags[j] = 1
+                        else:
+                            if random.random() < remove_p:
+                                flags[j] = 0
         if flags and flags[0] == 1:
             flags[0] = 0
         chars = chars[:max_length]
